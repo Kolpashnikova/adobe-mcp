@@ -73,16 +73,24 @@ const onCommandPacket = async (packet) => {
 
 function connectToServer() {
     // Create new Socket.IO connection
-    // Try websocket first, fallback to polling if UXP blocks WebSocket
+    // Since HTTP works but WebSocket times out, try polling first (uses HTTP)
+    // Polling is more reliable across firewalls and UXP sandbox restrictions
     console.log(`Attempting to connect to proxy server at: ${PROXY_URL}`);
+    console.log(`Connection options: timeout=30000ms, transports=[polling, websocket] (polling first)`);
+    
     socket = io(PROXY_URL, {
-        transports: ["websocket", "polling"],
+        transports: ["polling", "websocket"], // Try polling first since HTTP works
         upgrade: true,
-        rememberUpgrade: true,
-        timeout: 20000, // 20 second connection timeout
+        rememberUpgrade: false, // Don't remember upgrade to avoid WebSocket issues
+        timeout: 30000, // 30 second connection timeout
         reconnection: true,
         reconnectionAttempts: 5,
-        reconnectionDelay: 1000
+        reconnectionDelay: 2000,
+        forceNew: true,
+        reconnectionDelayMax: 5000,
+        maxHttpBufferSize: 1e6,
+        // Force polling for initial connection
+        autoConnect: true
     });
 
     socket.on("connect", () => {
@@ -119,7 +127,23 @@ function connectToServer() {
     socket.on("connect_error", (error) => {
         updateButton();
         console.error("Connection error:", error);
-        console.error(`Failed to connect to ${PROXY_URL}. Error type: ${error.type}, Message: ${error.message}`);
+        console.error(`Failed to connect to ${PROXY_URL}`);
+        console.error(`Error type: ${error.type || 'unknown'}, Message: ${error.message || error}`);
+        console.error(`Error details:`, JSON.stringify(error, null, 2));
+        
+        // Additional diagnostics
+        if (error.message && error.message.includes('timeout')) {
+            console.error(`TIMEOUT: The proxy server at ${PROXY_URL} is not reachable.`);
+            console.error(`Possible causes:`);
+            console.error(`1. Proxy server is not running`);
+            console.error(`2. Firewall is blocking port 3001`);
+            console.error(`3. Network connectivity issue between this machine and ${PROXY_URL}`);
+            console.error(`4. Proxy server is only listening on localhost (should listen on 0.0.0.0)`);
+        }
+    });
+    
+    socket.on("connect_timeout", () => {
+        console.error(`Connection timeout: Could not establish connection to ${PROXY_URL} within 30 seconds`);
     });
 
     socket.on("disconnect", (reason) => {

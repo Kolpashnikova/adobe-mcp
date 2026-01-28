@@ -23,8 +23,15 @@
 from mcp.server.fastmcp import FastMCP
 from ..shared import init, sendCommand, createCommand, socket_client
 import sys
+import os
+from pathlib import Path
 from typing import Optional, List
 from enum import Enum
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent.parent.parent / '.env'
+load_dotenv(env_path)
 
 # Create an MCP server
 mcp_name = "Adobe InDesign MCP Server"
@@ -32,7 +39,9 @@ mcp = FastMCP(mcp_name, log_level="ERROR")
 print(f"{mcp_name} running on stdio", file=sys.stderr)
 
 APPLICATION = "indesign"
-PROXY_URL = 'http://localhost:3001'
+PROXY_HOST = os.getenv('PROXY_HOST', 'localhost')
+PROXY_PORT = os.getenv('PROXY_PORT', '3001')
+PROXY_URL = f'http://{PROXY_HOST}:{PROXY_PORT}'
 PROXY_TIMEOUT = 20
 
 socket_client.configure(

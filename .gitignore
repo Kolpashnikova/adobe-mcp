@@ -61,3 +61,6 @@ htmlcov/
 
 # UXP Developer Tool
 .debug/
+
+# Environment variables
+.env

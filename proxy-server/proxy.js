@@ -21,6 +21,9 @@
  * SOFTWARE.
  */
 
+// Load environment variables from .env file
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -28,16 +31,21 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, 
   {
-    transports: ["websocket", "polling"], // Allow polling fallback for UXP sandbox
+    transports: ["polling", "websocket"], // Polling first for better firewall compatibility
     maxHttpBufferSize: 50 * 1024 * 1024,
     cors: {
       origin: "*",
-      methods: ["GET", "POST"]
-    }
+      methods: ["GET", "POST"],
+      credentials: true
+    },
+    allowEIO3: true, // Support older Engine.IO clients
+    pingTimeout: 60000, // Increase ping timeout for slow connections
+    pingInterval: 25000
   }
 );
 
-const PORT = 3001
+const PORT = process.env.PROXY_PORT || 3001;
+const PROXY_HOST = process.env.PROXY_HOST || '127.0.0.1';
 
 // Add middleware
 app.use(express.json());
@@ -151,6 +159,10 @@ function sendToApplication(packet) {
 // Example: Use this function elsewhere in your code
 // sendToApplication('photoshop', { message: 'Update available' });
 
-server.listen(PORT, () => {
-  console.log(`adb-mcp Command proxy server running on ws://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`adb-mcp Command proxy server running on ws://0.0.0.0:${PORT}`);
+  console.log(`Server accessible at ws://localhost:${PORT}`);
+  if (PROXY_HOST !== '127.0.0.1' && PROXY_HOST !== 'localhost') {
+    console.log(`Server accessible at ws://${PROXY_HOST}:${PORT}`);
+  }
 });

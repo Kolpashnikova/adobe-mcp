@@ -9,6 +9,7 @@ fonttools>=4.0.0
 python-socketio>=5.0.0
 websocket-client>=1.8.0
 requests>=2.32.0
+python-dotenv>=1.0.0
 
 # Development dependencies
 pytest>=7.0.0
