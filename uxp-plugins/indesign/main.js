@@ -24,6 +24,7 @@
 const { entrypoints, UI } = require("uxp");
 const { io } = require("./socket.io.js");
 const app = require("indesign");
+const config = require("./config.js");
 
 const {
     parseAndRouteCommand,
@@ -32,8 +33,7 @@ const {
 } = require("./commands/index.js");
 
 const APPLICATION = "indesign";
-// Use 127.0.0.1 instead of localhost - UXP sometimes treats them differently
-const PROXY_URL = "http://127.0.0.1:3001";
+const PROXY_URL = config.PROXY_URL;
 
 let socket = null;
 
@@ -74,10 +74,15 @@ const onCommandPacket = async (packet) => {
 function connectToServer() {
     // Create new Socket.IO connection
     // Try websocket first, fallback to polling if UXP blocks WebSocket
+    console.log(`Attempting to connect to proxy server at: ${PROXY_URL}`);
     socket = io(PROXY_URL, {
         transports: ["websocket", "polling"],
         upgrade: true,
-        rememberUpgrade: true
+        rememberUpgrade: true,
+        timeout: 20000, // 20 second connection timeout
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
     });
 
     socket.on("connect", () => {
@@ -114,6 +119,7 @@ function connectToServer() {
     socket.on("connect_error", (error) => {
         updateButton();
         console.error("Connection error:", error);
+        console.error(`Failed to connect to ${PROXY_URL}. Error type: ${error.type}, Message: ${error.message}`);
     });
 
     socket.on("disconnect", (reason) => {
