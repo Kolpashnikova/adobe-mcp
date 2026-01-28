@@ -32,7 +32,8 @@ const {
 } = require("./commands/index.js");
 
 const APPLICATION = "indesign";
-const PROXY_URL = "http://localhost:3001";
+// Use 127.0.0.1 instead of localhost - UXP sometimes treats them differently
+const PROXY_URL = "http://127.0.0.1:3001";
 
 let socket = null;
 
@@ -45,16 +46,24 @@ const onCommandPacket = async (packet) => {
 
     try {
         //this will throw if an active document is required and not open
-        checkRequiresActiveDocument(command);
+        await checkRequiresActiveDocument(command);
 
         let response = await parseAndRouteCommand(command);
 
         out.response = response;
         out.status = "SUCCESS";
-        out.activeDocument = await getActiveDocumentSettings();
+        
+        // Only get document settings if document exists
+        try {
+            out.activeDocument = getActiveDocumentSettings(command);
+        } catch (docError) {
+            console.warn("Could not get document settings:", docError);
+            out.activeDocument = null;
+        }
         //out.projectItems = await getProjectContentInfo();
         
     } catch (e) {
+        console.error(`Error in command ${command.action}:`, e);
         out.status = "FAILURE";
         out.message = `Error calling ${command.action} : ${e}`;
     }
@@ -64,8 +73,11 @@ const onCommandPacket = async (packet) => {
 
 function connectToServer() {
     // Create new Socket.IO connection
+    // Try websocket first, fallback to polling if UXP blocks WebSocket
     socket = io(PROXY_URL, {
-        transports: ["websocket"],
+        transports: ["websocket", "polling"],
+        upgrade: true,
+        rememberUpgrade: true
     });
 
     socket.on("connect", () => {
@@ -75,10 +87,23 @@ function connectToServer() {
     });
 
     socket.on("command_packet", async (packet) => {
-        console.log("Received command packet:", packet);
+        console.log("Received command packet:", JSON.stringify(packet, null, 2));
+        console.log("Command action:", packet.command ? packet.command.action : "NO COMMAND");
 
-        let response = await onCommandPacket(packet);
-        sendResponsePacket(response);
+        try {
+            let response = await onCommandPacket(packet);
+            console.log("Command processed, sending response:", JSON.stringify(response, null, 2));
+            sendResponsePacket(response);
+        } catch (error) {
+            console.error("Error processing command packet:", error);
+            // Send error response
+            const errorResponse = {
+                senderId: packet.senderId,
+                status: "FAILURE",
+                message: `Error processing command: ${error.message || error}`
+            };
+            sendResponsePacket(errorResponse);
+        }
     });
 
     socket.on("registration_response", (data) => {
@@ -110,11 +135,14 @@ function disconnectFromServer() {
 
 function sendResponsePacket(packet) {
     if (socket && socket.connected) {
+        console.log("Sending response packet:", JSON.stringify(packet, null, 2));
         socket.emit("command_packet_response", {
             packet: packet,
         });
+        console.log("Response packet sent successfully");
         return true;
     }
+    console.error("Cannot send response: socket not connected");
     return false;
 }
 

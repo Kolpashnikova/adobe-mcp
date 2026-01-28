@@ -28,7 +28,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, 
   {
-    transports: ["websocket"],
+    transports: ["websocket", "polling"], // Allow polling fallback for UXP sandbox
     maxHttpBufferSize: 50 * 1024 * 1024,
     cors: {
       origin: "*",

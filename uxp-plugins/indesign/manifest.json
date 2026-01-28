@@ -71,7 +71,12 @@
   ],
   "requiredPermissions": {
     "network": {
-      "domains": "all"
+      "domains": [
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "ws://localhost:3001",
+        "ws://127.0.0.1:3001"
+      ]
     },
     "localFileSystem": "fullAccess"
   },
