@@ -31,7 +31,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, 
   {
-    transports: ["polling", "websocket"], // Polling first for better firewall compatibility
+    transports: ["websocket", "polling"], // WebSocket first, polling fallback for non-UXP clients
     maxHttpBufferSize: 50 * 1024 * 1024,
     cors: {
       origin: "*",
@@ -40,7 +40,10 @@ const io = new Server(server,
     },
     allowEIO3: true, // Support older Engine.IO clients
     pingTimeout: 60000, // Increase ping timeout for slow connections
-    pingInterval: 25000
+    pingInterval: 25000,
+    // WebSocket-specific options
+    perMessageDeflate: false, // Disable compression for better compatibility
+    httpCompression: false
   }
 );
 

@@ -73,24 +73,21 @@ const onCommandPacket = async (packet) => {
 
 function connectToServer() {
     // Create new Socket.IO connection
-    // Since HTTP works but WebSocket times out, try polling first (uses HTTP)
-    // Polling is more reliable across firewalls and UXP sandbox restrictions
+    // UXP blocks XMLHttpRequest, so we must use WebSocket only (like other plugins)
+    // WebSocket should work since HTTP connectivity is confirmed
     console.log(`Attempting to connect to proxy server at: ${PROXY_URL}`);
-    console.log(`Connection options: timeout=30000ms, transports=[polling, websocket] (polling first)`);
+    console.log(`Using WebSocket transport only (UXP blocks XMLHttpRequest for polling)`);
     
     socket = io(PROXY_URL, {
-        transports: ["polling", "websocket"], // Try polling first since HTTP works
-        upgrade: true,
-        rememberUpgrade: false, // Don't remember upgrade to avoid WebSocket issues
+        transports: ["websocket"], // WebSocket only - UXP blocks XHR polling
+        upgrade: false, // Don't try to upgrade (we're already using websocket)
         timeout: 30000, // 30 second connection timeout
         reconnection: true,
         reconnectionAttempts: 5,
         reconnectionDelay: 2000,
         forceNew: true,
         reconnectionDelayMax: 5000,
-        maxHttpBufferSize: 1e6,
-        // Force polling for initial connection
-        autoConnect: true
+        maxHttpBufferSize: 1e6
     });
 
     socket.on("connect", () => {
@@ -133,17 +130,31 @@ function connectToServer() {
         
         // Additional diagnostics
         if (error.message && error.message.includes('timeout')) {
-            console.error(`TIMEOUT: The proxy server at ${PROXY_URL} is not reachable.`);
+            console.error(`TIMEOUT: WebSocket connection to ${PROXY_URL} timed out.`);
             console.error(`Possible causes:`);
-            console.error(`1. Proxy server is not running`);
-            console.error(`2. Firewall is blocking port 3001`);
-            console.error(`3. Network connectivity issue between this machine and ${PROXY_URL}`);
-            console.error(`4. Proxy server is only listening on localhost (should listen on 0.0.0.0)`);
+            console.error(`1. WebSocket upgrade request blocked by firewall`);
+            console.error(`2. Proxy server WebSocket endpoint not accessible`);
+            console.error(`3. Network connectivity issue (but HTTP works, so this is less likely)`);
+            console.error(`4. UXP sandbox blocking WebSocket connections`);
+        } else if (error.message && error.message.includes('xhr')) {
+            console.error(`XHR ERROR: UXP is blocking XMLHttpRequest. Using WebSocket-only transport.`);
         }
     });
     
     socket.on("connect_timeout", () => {
-        console.error(`Connection timeout: Could not establish connection to ${PROXY_URL} within 30 seconds`);
+        console.error(`Connection timeout: Could not establish WebSocket connection to ${PROXY_URL} within 30 seconds`);
+        console.error(`Note: HTTP connectivity works (curl succeeded), but WebSocket handshake is failing`);
+    });
+    
+    socket.on("reconnect_attempt", (attemptNumber) => {
+        console.log(`Reconnection attempt ${attemptNumber}/5`);
+    });
+    
+    socket.on("reconnect_failed", () => {
+        console.error(`All reconnection attempts failed. Please check:`);
+        console.error(`1. Proxy server is running: curl http://${PROXY_URL}/status`);
+        console.error(`2. WebSocket port is accessible`);
+        console.error(`3. Firewall allows WebSocket connections`);
     });
 
     socket.on("disconnect", (reason) => {
