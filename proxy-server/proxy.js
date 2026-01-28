@@ -66,6 +66,85 @@ app.get('/status', (req, res) => {
   };
   res.json(status);
 });
+
+// HTTP polling endpoints for UXP plugins (since WebSocket is blocked)
+// Store pending commands by client ID
+const pendingCommands = new Map(); // clientId -> queue of commands
+const clientQueues = new Map(); // clientId -> { lastPoll, application }
+
+// Register client via HTTP
+app.post('/register', (req, res) => {
+  const { clientId, application } = req.body;
+  if (!clientId || !application) {
+    return res.status(400).json({ error: 'clientId and application required' });
+  }
+  
+  clientQueues.set(clientId, {
+    application,
+    lastPoll: Date.now()
+  });
+  
+  if (!pendingCommands.has(clientId)) {
+    pendingCommands.set(clientId, []);
+  }
+  
+  console.log(`HTTP client registered: ${clientId} for ${application}`);
+  res.json({ status: 'registered', clientId, application });
+});
+
+// Poll for commands (long polling)
+app.get('/poll/:clientId', (req, res) => {
+  const { clientId } = req.params;
+  const timeout = parseInt(req.query.timeout) || 30000; // 30 second timeout
+  
+  // Update last poll time
+  const clientInfo = clientQueues.get(clientId);
+  if (clientInfo) {
+    clientInfo.lastPoll = Date.now();
+  }
+  
+  // Check for pending commands
+  const queue = pendingCommands.get(clientId) || [];
+  
+  if (queue.length > 0) {
+    // Return commands immediately
+    const commands = queue.splice(0); // Clear queue
+    return res.json({ commands, hasMore: false });
+  }
+  
+  // Long polling: wait for command or timeout
+  const startTime = Date.now();
+  const checkInterval = setInterval(() => {
+    const queue = pendingCommands.get(clientId) || [];
+    if (queue.length > 0) {
+      clearInterval(checkInterval);
+      const commands = queue.splice(0);
+      res.json({ commands, hasMore: false });
+    } else if (Date.now() - startTime >= timeout) {
+      clearInterval(checkInterval);
+      res.json({ commands: [], hasMore: false });
+    }
+  }, 100);
+  
+  // Cleanup on client disconnect
+  req.on('close', () => {
+    clearInterval(checkInterval);
+  });
+});
+
+// Send command response via HTTP
+app.post('/response', (req, res) => {
+  const { senderId, response } = req.body;
+  
+  // Forward to Socket.IO clients if senderId is a socket ID
+  if (senderId && applicationClients) {
+    // Try to find the socket and emit response
+    // This is a simplified version - in production you'd track socket IDs
+    io.to(senderId).emit('packet_response', response);
+  }
+  
+  res.json({ status: 'received' });
+});
 // Track clients by application
 const applicationClients = {};
 
@@ -143,20 +222,35 @@ io.on('connection', (socket) => {
 
 // Add a function to send messages to clients by application
 function sendToApplication(packet) {
-
     let application = packet.application
-    if (applicationClients[application]) {
-        console.log(`Sending to ${applicationClients[application].size} clients for ${application}`);
     
+    // Send to Socket.IO clients
+    if (applicationClients[application]) {
+        console.log(`Sending to ${applicationClients[application].size} Socket.IO clients for ${application}`);
         let senderId = packet.senderId
-        // Loop through all client IDs for this application
         applicationClients[application].forEach(clientId => {
             io.to(clientId).emit('command_packet', packet);
-    });
-    return true;
-  }
-  console.log(`No clients registered for application: ${application}`);
-  return false;
+        });
+    }
+    
+    // Also send to HTTP polling clients
+    let httpClientsFound = false;
+    for (const [clientId, clientInfo] of clientQueues.entries()) {
+        if (clientInfo.application === application) {
+            httpClientsFound = true;
+            const queue = pendingCommands.get(clientId) || [];
+            queue.push(packet);
+            pendingCommands.set(clientId, queue);
+            console.log(`Queued command for HTTP client ${clientId}`);
+        }
+    }
+    
+    if (applicationClients[application] || httpClientsFound) {
+        return true;
+    }
+    
+    console.log(`No clients registered for application: ${application}`);
+    return false;
 }
 
 // Example: Use this function elsewhere in your code

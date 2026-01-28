@@ -36,6 +36,9 @@ const APPLICATION = "indesign";
 const PROXY_URL = config.PROXY_URL;
 
 let socket = null;
+let httpClientId = null;
+let httpPolling = false;
+let httpPollAbortController = null;
 
 const onCommandPacket = async (packet) => {
     let command = packet.command;
@@ -71,29 +74,132 @@ const onCommandPacket = async (packet) => {
     return out;
 };
 
+// HTTP-based connection using fetch (works around UXP WebSocket blocking)
+async function connectToServerHTTP() {
+    try {
+        // Generate unique client ID
+        httpClientId = `uxp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        // Register with proxy server
+        const registerResponse = await fetch(`${PROXY_URL}/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientId: httpClientId, application: APPLICATION })
+        });
+        
+        if (!registerResponse.ok) {
+            throw new Error(`Registration failed: ${registerResponse.status}`);
+        }
+        
+        const registerData = await registerResponse.json();
+        console.log(`HTTP client registered: ${registerData.clientId}`);
+        
+        httpPolling = true;
+        updateButton();
+        
+        // Start polling for commands
+        startHTTPPolling();
+        
+        return true;
+    } catch (error) {
+        console.error('HTTP connection failed:', error);
+        httpPolling = false;
+        updateButton();
+        return false;
+    }
+}
+
+// HTTP long polling for commands
+async function startHTTPPolling() {
+    if (!httpPolling || !httpClientId) return;
+    
+    // Abort previous poll if exists
+    if (httpPollAbortController) {
+        httpPollAbortController.abort();
+    }
+    
+    httpPollAbortController = new AbortController();
+    
+    try {
+        const response = await fetch(`${PROXY_URL}/poll/${httpClientId}?timeout=30000`, {
+            method: 'GET',
+            signal: httpPollAbortController.signal
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Poll failed: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        // Process received commands
+        if (data.commands && data.commands.length > 0) {
+            for (const packet of data.commands) {
+                console.log("Received command packet via HTTP:", JSON.stringify(packet, null, 2));
+                try {
+                    let response = await onCommandPacket(packet);
+                    console.log("Command processed, sending response:", JSON.stringify(response, null, 2));
+                    sendHTTPResponse(response);
+                } catch (error) {
+                    console.error("Error processing command packet:", error);
+                    const errorResponse = {
+                        senderId: packet.senderId,
+                        status: "FAILURE",
+                        message: `Error processing command: ${error.message || error}`
+                    };
+                    sendHTTPResponse(errorResponse);
+                }
+            }
+        }
+        
+        // Continue polling
+        if (httpPolling) {
+            setTimeout(() => startHTTPPolling(), 100);
+        }
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            // Poll was aborted (normal)
+            return;
+        }
+        console.error('HTTP polling error:', error);
+        // Retry after delay
+        if (httpPolling) {
+            setTimeout(() => startHTTPPolling(), 2000);
+        }
+    }
+}
+
+// Send response via HTTP
+async function sendHTTPResponse(packet) {
+    try {
+        await fetch(`${PROXY_URL}/response`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ senderId: packet.senderId, response: packet })
+        });
+    } catch (error) {
+        console.error('Failed to send HTTP response:', error);
+    }
+}
+
 function connectToServer() {
-    // Create new Socket.IO connection
-    // UXP blocks XMLHttpRequest, so we must use WebSocket only (like other plugins)
-    // WebSocket should work since HTTP connectivity is confirmed
+    // Try WebSocket first, fallback to HTTP polling if WebSocket is blocked
     console.log(`Attempting to connect to proxy server at: ${PROXY_URL}`);
-    console.log(`Using WebSocket transport only (UXP blocks XMLHttpRequest for polling)`);
+    console.log(`Trying WebSocket first, will fallback to HTTP polling if blocked`);
     
     socket = io(PROXY_URL, {
         transports: ["websocket"], // WebSocket only - UXP blocks XHR polling
-        upgrade: false, // Don't try to upgrade (we're already using websocket)
-        timeout: 30000, // 30 second connection timeout
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 2000,
-        forceNew: true,
-        reconnectionDelayMax: 5000,
-        maxHttpBufferSize: 1e6
+        upgrade: false,
+        timeout: 10000, // Shorter timeout for WebSocket attempt
+        reconnection: false, // We'll handle fallback manually
+        forceNew: true
     });
 
     socket.on("connect", () => {
         updateButton();
-        console.log("Connected to server with ID:", socket.id);
+        console.log("Connected via WebSocket with ID:", socket.id);
         socket.emit("register", { application: APPLICATION });
+        httpPolling = false; // WebSocket works, disable HTTP fallback
     });
 
     socket.on("command_packet", async (packet) => {
@@ -121,40 +227,26 @@ function connectToServer() {
         //TODO: connect button here
     });
 
-    socket.on("connect_error", (error) => {
-        updateButton();
-        console.error("Connection error:", error);
-        console.error(`Failed to connect to ${PROXY_URL}`);
-        console.error(`Error type: ${error.type || 'unknown'}, Message: ${error.message || error}`);
-        console.error(`Error details:`, JSON.stringify(error, null, 2));
+    socket.on("connect_error", async (error) => {
+        console.error("WebSocket connection error:", error);
+        console.error(`WebSocket failed, falling back to HTTP polling...`);
         
-        // Additional diagnostics
-        if (error.message && error.message.includes('timeout')) {
-            console.error(`TIMEOUT: WebSocket connection to ${PROXY_URL} timed out.`);
-            console.error(`Possible causes:`);
-            console.error(`1. WebSocket upgrade request blocked by firewall`);
-            console.error(`2. Proxy server WebSocket endpoint not accessible`);
-            console.error(`3. Network connectivity issue (but HTTP works, so this is less likely)`);
-            console.error(`4. UXP sandbox blocking WebSocket connections`);
-        } else if (error.message && error.message.includes('xhr')) {
-            console.error(`XHR ERROR: UXP is blocking XMLHttpRequest. Using WebSocket-only transport.`);
+        // Fallback to HTTP polling
+        socket.disconnect();
+        socket = null;
+        
+        const httpConnected = await connectToServerHTTP();
+        if (!httpConnected) {
+            updateButton();
+            console.error(`Both WebSocket and HTTP polling failed. Connection unavailable.`);
         }
     });
     
-    socket.on("connect_timeout", () => {
-        console.error(`Connection timeout: Could not establish WebSocket connection to ${PROXY_URL} within 30 seconds`);
-        console.error(`Note: HTTP connectivity works (curl succeeded), but WebSocket handshake is failing`);
-    });
-    
-    socket.on("reconnect_attempt", (attemptNumber) => {
-        console.log(`Reconnection attempt ${attemptNumber}/5`);
-    });
-    
-    socket.on("reconnect_failed", () => {
-        console.error(`All reconnection attempts failed. Please check:`);
-        console.error(`1. Proxy server is running: curl http://${PROXY_URL}/status`);
-        console.error(`2. WebSocket port is accessible`);
-        console.error(`3. Firewall allows WebSocket connections`);
+    socket.on("connect_timeout", async () => {
+        console.error(`WebSocket timeout, falling back to HTTP polling...`);
+        socket.disconnect();
+        socket = null;
+        await connectToServerHTTP();
     });
 
     socket.on("disconnect", (reason) => {
@@ -170,20 +262,37 @@ function connectToServer() {
 function disconnectFromServer() {
     if (socket && socket.connected) {
         socket.disconnect();
-        console.log("Disconnected from server");
+        socket = null;
+        console.log("Disconnected from WebSocket server");
     }
+    
+    if (httpPolling) {
+        httpPolling = false;
+        if (httpPollAbortController) {
+            httpPollAbortController.abort();
+            httpPollAbortController = null;
+        }
+        httpClientId = null;
+        console.log("Disconnected from HTTP polling");
+    }
+    
+    updateButton();
 }
 
 function sendResponsePacket(packet) {
     if (socket && socket.connected) {
-        console.log("Sending response packet:", JSON.stringify(packet, null, 2));
+        console.log("Sending response packet via WebSocket:", JSON.stringify(packet, null, 2));
         socket.emit("command_packet_response", {
             packet: packet,
         });
         console.log("Response packet sent successfully");
         return true;
+    } else if (httpPolling) {
+        console.log("Sending response packet via HTTP:", JSON.stringify(packet, null, 2));
+        sendHTTPResponse(packet);
+        return true;
     }
-    console.error("Cannot send response: socket not connected");
+    console.error("Cannot send response: not connected");
     return false;
 }
 
@@ -208,13 +317,14 @@ entrypoints.setup({
 
 let updateButton = () => {
     let b = document.getElementById("btnStart");
-
-    b.textContent = socket && socket.connected ? "Disconnect" : "Connect";
+    const isConnected = (socket && socket.connected) || httpPolling;
+    b.textContent = isConnected ? "Disconnect" : "Connect";
 };
 
 //Toggle button to make it start stop
 document.getElementById("btnStart").addEventListener("click", () => {
-    if (socket && socket.connected) {
+    const isConnected = (socket && socket.connected) || httpPolling;
+    if (isConnected) {
         disconnectFromServer();
     } else {
         connectToServer();
